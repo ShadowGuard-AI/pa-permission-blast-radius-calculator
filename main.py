@@ -79,6 +79,7 @@ def _counts_as_access(value):
         text = value.strip().lower()
         if not text:
             return False
+        # Any string outside this short deny list counts as access, including odd values like a zero written as text or a note someone left in the config. I would rather overstate the blast radius than argue about shades of grant in a hand written file.
         if text in ("deny", "denied", "none", "no", "false"):
             return False
         return True
@@ -107,6 +108,7 @@ def simulate_access(user, resource, permissions_data, group_membership=None):
                 logging.info(f"User {user} has explicit access to {resource} with permission value counted: {value}")
                 return True
 
+        # Reaching this line means a direct entry that did not count, including an explicit deny, does not end the check. Group access is still tried afterwards, so in my model a group grant overrides a user level deny rather than the deny winning.
         groups = simulate_group_membership(user, group_membership)
 
         for group in groups:
@@ -118,6 +120,7 @@ def simulate_access(user, resource, permissions_data, group_membership=None):
                         return True
         logging.info(f"User {user} does not have access to {resource}.")
         return False
+    # This wide handler is why a malformed permissions entry, say a list where I expect a mapping, reads as no access instead of as bad input. The failure and the honest no are indistinguishable in the final table.
     except Exception as e:
         logging.error(f"Error simulating access to {resource}: {e}")
         return False
@@ -135,6 +138,7 @@ def simulate_group_membership(user, group_membership=None):
     if not isinstance(group_membership, dict):
         return []
     groups = group_membership.get(user, [])
+    # Membership is one level deep only. A group nested inside another group in the config is never expanded, so access held through nested groups is missing from the result and the radius I report is smaller than the real one.
     if isinstance(groups, list):
         return groups
     return []
@@ -165,6 +169,7 @@ def assess_impact(user, resources, permissions_data, criticality_data, group_mem
             logging.error(f"Error processing resource {resource}: {e}")
 
     # Rank targets by criticality (high > medium > low)
+    # The ranking knows nothing about the kind of access, only the resource criticality. Read access to a high resource sorts level with write access to it, and Python's stable sort leaves equal rows in the order the resources list named them.
     ranked_targets = sorted(high_impact_targets, key=lambda x: {"high": 3, "medium": 2, "low": 1}[x["criticality"]], reverse=True)
 
     return ranked_targets
