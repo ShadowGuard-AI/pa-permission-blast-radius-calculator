@@ -70,7 +70,22 @@ def load_configuration(config_file):
         raise
 
 
-def simulate_access(user, resource, permissions_data):
+def _counts_as_access(value):
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if not text:
+            return False
+        if text in ("deny", "denied", "none", "no", "false"):
+            return False
+        return True
+    return bool(value)
+
+
+def simulate_access(user, resource, permissions_data, group_membership=None):
     """
     Simulates access to a resource based on the user and permissions data.
 
@@ -78,27 +93,28 @@ def simulate_access(user, resource, permissions_data):
         user (str): The user to simulate access for.
         resource (str): The resource to check access to.
         permissions_data (dict): A dictionary containing user/group permissions.
+        group_membership (dict): Mapping of user names to lists of group names,
+            read from the config file under the group_membership key.
 
     Returns:
         bool: True if the user has access to the resource, False otherwise.
     """
 
     try:
-        # Check user-specific permissions
         if user in permissions_data and resource in permissions_data[user]:
-            if permissions_data[user][resource] == "read" or permissions_data[user][resource] == "write":
-                logging.info(f"User {user} has explicit {permissions_data[user][resource]} access to {resource}.")
+            value = permissions_data[user][resource]
+            if _counts_as_access(value):
+                logging.info(f"User {user} has explicit access to {resource} with permission value counted: {value}")
                 return True
 
-        # Simulate group membership and check group permissions (placeholder)
-        # Replace with actual group membership logic
-        groups = simulate_group_membership(user) # Use helper function
+        groups = simulate_group_membership(user, group_membership)
 
         for group in groups:
              if group in permissions_data:
                 if resource in permissions_data[group]:
-                    if permissions_data[group][resource] == "read" or permissions_data[group][resource] == "write":
-                        logging.info(f"User {user} has {permissions_data[group][resource]} access to {resource} via group {group}.")
+                    value = permissions_data[group][resource]
+                    if _counts_as_access(value):
+                        logging.info(f"User {user} has access to {resource} via group {group} with permission value counted: {value}")
                         return True
         logging.info(f"User {user} does not have access to {resource}.")
         return False
@@ -106,25 +122,24 @@ def simulate_access(user, resource, permissions_data):
         logging.error(f"Error simulating access to {resource}: {e}")
         return False
 
-def simulate_group_membership(user):
-    """Simulates Group Membership
+def simulate_group_membership(user, group_membership=None):
+    """Returns group membership for a user from the config data.
     Args:
         user (str): The user that we want to get group membership for
+        group_membership (dict): Mapping from the config file under the
+            group_membership key. A user with no entry is groupless.
 
     Returns:
         list: returns a list of the groups a user belongs to
     """
-    #This is an extremely simplified example.  In a real implementation, this would
-    #interact with an actual user/group directory (LDAP, Active Directory, etc.)
-    #or a local database of group memberships.
-    if user == "john.doe":
-        return ["developers", "testers"]
-    elif user == "jane.smith":
-        return ["administrators"]
-    else:
+    if not isinstance(group_membership, dict):
         return []
+    groups = group_membership.get(user, [])
+    if isinstance(groups, list):
+        return groups
+    return []
 
-def assess_impact(user, resources, permissions_data, criticality_data):
+def assess_impact(user, resources, permissions_data, criticality_data, group_membership=None):
     """
     Assesses the impact of a compromised identity by mapping permissions to
     critical resources.
@@ -141,7 +156,7 @@ def assess_impact(user, resources, permissions_data, criticality_data):
     high_impact_targets = []
     for resource in resources:
         try:
-            if simulate_access(user, resource, permissions_data):
+            if simulate_access(user, resource, permissions_data, group_membership):
                 criticality = criticality_data.get(resource, "low")  # Default to low
                 high_impact_targets.append({"resource": resource, "criticality": criticality})
                 logging.info(f"User {user} has access to {resource} (criticality: {criticality}).")
@@ -186,8 +201,10 @@ def save_results(ranked_targets, output_file):
         with open(output_file, 'w') as f:
             json.dump(ranked_targets, f, indent=4)
         logging.info(f"Results saved to {output_file}")
+        return True
     except Exception as e:
         logging.error(f"Error saving results to {output_file}: {e}")
+        return False
 
 
 def main():
@@ -199,10 +216,15 @@ def main():
     try:
         config = load_configuration(args.config)
 
+        if args.output and os.path.realpath(args.output) == os.path.realpath(args.config):
+            print("Error: Output file must not be the same as the config file.")
+            exit(1)
+
         user = args.user
         resources = config.get("resources", [])
         permissions_data = config.get("permissions", {})
         criticality_data = config.get("criticality", {})
+        group_membership = config.get("group_membership", {})
 
         # Input Validation
         if not isinstance(resources, list):
@@ -211,13 +233,29 @@ def main():
             raise ValueError("Permissions must be a dictionary in the configuration file.")
         if not isinstance(criticality_data, dict):
             raise ValueError("Criticality must be a dictionary in the configuration file.")
+        if not isinstance(group_membership, dict):
+            raise ValueError("group_membership must be a dictionary in the configuration file.")
 
-        ranked_targets = assess_impact(user, resources, permissions_data, criticality_data)
+        for resource_name, crit_value in criticality_data.items():
+            if crit_value not in ("high", "medium", "low"):
+                raise ValueError(f"Invalid criticality for resource {resource_name}: {crit_value}")
+
+        if not resources:
+            print("Nothing to assess: the resources list is empty.")
+            exit(1)
+
+        if user not in permissions_data and user not in group_membership:
+            print(f"User not present: {user} has no entry in the configuration.")
+            exit(1)
+
+        ranked_targets = assess_impact(user, resources, permissions_data, criticality_data, group_membership)
 
         display_results(ranked_targets)
 
         if args.output:
-            save_results(ranked_targets, args.output)
+            if not save_results(ranked_targets, args.output):
+                print(f"Results not saved: {args.output}")
+                exit(1)
 
     except FileNotFoundError:
         print("Error: Configuration file not found. Please check the path.")
@@ -250,6 +288,9 @@ if __name__ == "__main__":
     #   "criticality": {
     #     "/data/sensitive.txt": "high",
     #     "/config/database.yml": "medium"
+    #   },
+    #   "group_membership": {
+    #     "jane.smith": ["administrators"]
     #   }
     # }
 
